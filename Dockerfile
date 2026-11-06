@@ -2,12 +2,12 @@
 # Eigen armv7 (32-bit ARM) build van Audiobookshelf voor de QNAP TS-431P3.
 # Upstream ondersteunt armv7 niet meer; dit is een best-effort build.
 #
-# Bouwstrategie: client, server (tsc) en de JS-productie-dependencies worden
-# NATIEF op de Actions-runner gebouwd ($BUILDPLATFORM; snel, geen QEMU; een
-# volledige npm ci onder QEMU armv7 hangt). De native npm-module sqlite3
-# wordt daarna apart voor armv7/musl gecompileerd met npm rebuild (lokaal
-# werk, geen npm ci). Onder QEMU blijven dus alleen sqlite3 en de kleine
-# libnusqlite3-compilatie over.
+# Bouwstrategie: ALLES wat npm/node-gyp nodig heeft, draait NATIEF op de
+# Actions-runner ($BUILDPLATFORM; npm/node-gyp onder QEMU armv7 hangt
+# urenlang). De native npm-module sqlite3 wordt daarom GECROSS-compileerd:
+# op de amd64-runner met de musl.cc armv7l-toolchain (zelfde aanpak als de
+# eigen linux-musl CI van node-sqlite3). Onder QEMU blijft alleen de kleine
+# libnusqlite3-compilatie over (git/cmake/make onder QEMU werken prima).
 #
 # Runtime-basis: Alpine (musl). Debian bookworm gebruikt glibc 2.36; binaries
 # daarvan crashen op de oude QNAP-kernel met "ELF load command address/offset
@@ -44,17 +44,29 @@ RUN if find node_modules -name "*.node" | grep -q .; then \
       find node_modules -name "*.node" && exit 1; \
     fi
 
-# STAGE 3: native npm-modules (sqlite3) voor armv7/musl compileren.
-# Gebruikt de node_modules uit prod-deps; npm rebuild doet alleen een
-# node-gyp compile (plus Node-headers download), geen volledige npm ci.
-FROM --platform=linux/arm/v7 ${NODE_IMAGE_ARM} AS native-armv7
-RUN apk add --no-cache python3 make g++
+# STAGE 3: sqlite3-binding CROSS-compileren voor armv7/musl -- natief op de
+# runner (amd64), met de musl.cc armv7l-cross-toolchain. De binding is pure C
+# (N-API) en linkt niet tegen libnode, dus de node-headers (arch-onafhankelijk)
+# plus de cross-gcc volstaan. Geen require-check hier: de x64-node kan een
+# armv7-binding niet laden; in plaats daarvan controleert readelf of de output
+# een ARM-binary is.
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS sqlite3-armv7
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 make curl ca-certificates xz-utils && \
+    rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://musl.cc/armv7l-linux-musleabihf-cross.tgz | tar xz -C /opt
+ENV PATH="/opt/armv7l-linux-musleabihf-cross/bin:$PATH" \
+    CC=armv7l-linux-musleabihf-gcc \
+    CXX=armv7l-linux-musleabihf-g++ \
+    AR=armv7l-linux-musleabihf-ar
 WORKDIR /server
 COPY abs-src/package.json /server/package.json
 COPY --from=prod-deps /server/node_modules /server/node_modules
-RUN npm rebuild sqlite3 --build-from-source=sqlite3 && \
-    find node_modules -name "*.node" && \
-    node -e "require('sqlite3')" || (echo 'sqlite3 binding werkt niet' && exit 1)
+RUN cd node_modules/sqlite3 && \
+    npx --yes node-gyp rebuild --release && \
+    find /server/node_modules -name "*.node" && \
+    armv7l-linux-musleabihf-readelf -h build/Release/node_sqlite3.node | grep -q "Machine:.*ARM" || \
+      (echo 'sqlite3 binding is geen ARM-binary' && exit 1)
 
 # STAGE 4: libnusqlite3 compileren voor armv7/musl (geen upstream-binary).
 # Procedure volgens de eigen build-workflow van mikiher/nunicode-sqlite:
@@ -82,7 +94,7 @@ COPY --from=nusqlite /usr/local/lib/nusqlite3/libnusqlite3.so /usr/local/lib/nus
 WORKDIR /app
 COPY --from=build-client /client/dist /app/client/dist
 COPY --from=compile-server /server/dist-server /app/dist-server
-COPY --from=native-armv7 /server/node_modules /app/node_modules
+COPY --from=sqlite3-armv7 /server/node_modules /app/node_modules
 COPY --from=prod-deps /server/package.json /server/index.js /app/
 
 ENV PORT=80 \
