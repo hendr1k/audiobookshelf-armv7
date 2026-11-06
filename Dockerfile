@@ -36,15 +36,24 @@ WORKDIR /server
 COPY --from=compile-server /server /server
 RUN npm ci --omit=dev && npm cache clean --force
 
-# STAGE 3: libnusqlite3 compileren voor armv7 (geen upstream-binary)
+# STAGE 3: libnusqlite3 compileren voor armv7 (geen upstream-binary).
+# Procedure volgens de eigen build-workflow van mikiher/nunicode-sqlite:
+# nunicode-broncode van Bitbucket (tag 1.11) + aangepaste CMakeLists.txt uit
+# mikiher/nunicode-sqlite + sqlite3-headers in de source-tree, dan cmake+make.
 FROM --platform=linux/arm/v7 ${NODE_IMAGE} AS nusqlite
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git python3 make g++ ca-certificates && \
+      git cmake make g++ libsqlite3-dev ca-certificates && \
     rm -rf /var/lib/apt/lists/*
-RUN git clone --depth 1 https://github.com/mikiher/nunicode-sqlite.git /tmp/nusq && \
-    cd /tmp/nusq && make && \
+RUN git clone https://bitbucket.org/alekseyt/nunicode.git /tmp/nu && \
+    cd /tmp/nu && git checkout 1.11 && \
+    git clone --depth 1 https://github.com/mikiher/nunicode-sqlite.git /tmp/nusq && \
+    cp /tmp/nusq/CMakeLists.txt /tmp/nu/ && \
+    mkdir -p /tmp/nu/include && cp /usr/include/sqlite3*.h /tmp/nu/include/ && \
+    mkdir -p /tmp/nu/staging/build && cd /tmp/nu/staging/build && \
+    cmake -DCMAKE_BUILD_TYPE=Release ../.. && \
+    make -j2 nusqlite3 && \
     mkdir -p /usr/local/lib/nusqlite3 && \
-    cp libnusqlite3.so /usr/local/lib/nusqlite3/
+    cp /tmp/nu/staging/build/sqlite3/libnusqlite3.so /usr/local/lib/nusqlite3/
 
 # STAGE 4: minimale runtime
 FROM --platform=linux/arm/v7 ${NODE_IMAGE}
