@@ -1,0 +1,50 @@
+name: Build armv7 image
+
+on:
+  workflow_dispatch:
+    inputs:
+      abs_version:
+        description: "ABS-versie (bijv. 2.37.2)"
+        required: true
+  schedule:
+    - cron: "0 5 * * 1"   # wekelijkse poging; tag hieronder aanpassen
+
+env:
+  ABS_VERSION: "2.37.2"    # pin: zet hier de gewenste release-tag (zonder 'v')
+  IMAGE: ghcr.io/${{ github.repository_owner }}/audiobookshelf-armv7
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: ABS-broncode ophalen (${{ env.ABS_VERSION }})
+        run: |
+          mkdir abs-src
+          curl -L https://github.com/advplyr/audiobookshelf/archive/refs/tags/v${ABS_VERSION}.tar.gz \
+            | tar xz --strip-components=1 -C abs-src
+
+      - name: Checkout Dockerfile
+        uses: actions/checkout@v4
+
+      - name: QEMU + buildx instellen
+        run: |
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes || true
+          docker buildx create --use
+
+      - name: Inloggen bij GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build en push
+        run: |
+          docker buildx build \
+            --platform linux/arm/v7 \
+            -t ${IMAGE}:latest \
+            -t ${IMAGE}:${ABS_VERSION} \
+            --push .

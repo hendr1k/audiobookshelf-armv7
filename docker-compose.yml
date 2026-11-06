@@ -1,0 +1,13 @@
+services:
+  audiobookshelf:
+    image: ghcr.io/hendr1k/audiobookshelf-armv7:latest
+    container_name: audiobookshelf
+    restart: unless-stopped
+    ports:
+      - "13378:80"
+    volumes:
+      - /share/Container/audiobookshelf/config:/config
+      - /share/Container/audiobookshelf/metadata:/metadata
+      - /share/Multimedia/podcasts:/podcasts
+    environment:
+      - TZ=Europe/Amsterdam
