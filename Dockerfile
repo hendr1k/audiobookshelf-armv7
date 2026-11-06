@@ -5,17 +5,19 @@
 # Bouwstrategie: ALLES wat npm/node-gyp nodig heeft, draait NATIEF op de
 # Actions-runner ($BUILDPLATFORM; npm/node-gyp onder QEMU armv7 hangt
 # urenlang). De native npm-module sqlite3 wordt daarom GECROSS-compileerd:
-# op de amd64-runner met de musl.cc armv7l-toolchain (zelfde aanpak als de
-# eigen linux-musl CI van node-sqlite3). Onder QEMU blijft alleen de kleine
-# libnusqlite3-compilatie over (git/cmake/make onder QEMU werken prima).
+# op de amd64-runner met de Debian armhf-cross-toolchain. Onder QEMU blijft
+# alleen de kleine libnusqlite3-compilatie over (git/cmake/make werken
+# onder QEMU prima).
 #
-# Runtime-basis: Alpine (musl). Debian bookworm gebruikt glibc 2.36; binaries
-# daarvan crashen op de oude QNAP-kernel met "ELF load command address/offset
-# not page-aligned". musl heeft dat probleem niet. Node 22 is de laatste Node
-# met officiele armv7-images.
+# Runtime-basis: Debian bullseye (glibc 2.31). Nieuwere bases worden door
+# de oude QNAP-kernel geweigerd: bookworm (glibc 2.36) met "ELF load
+# command address/offset not page-aligned", en recente Alpine/musl-
+# images (vanaf ~3.18 getest) stilletjes exit 0 zonder output. Bullseye
+# is op de NAS getest en draait. Node 22 is de laatste Node met officiele
+# armv7-images.
 
 ARG NODE_IMAGE=node:22-bookworm-slim
-ARG NODE_IMAGE_ARM=node:22-alpine
+ARG NODE_IMAGE_ARM=node:22-bullseye
 
 # STAGE 0: client (Nuxt generate) -- native op de runner
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS build-client
@@ -44,40 +46,44 @@ RUN if find node_modules -name "*.node" | grep -q .; then \
       find node_modules -name "*.node" && exit 1; \
     fi
 
-# STAGE 3: sqlite3-binding CROSS-compileren voor armv7/musl -- natief op de
-# runner (amd64), met de musl.cc armv7l-cross-toolchain. De binding is pure C
-# (N-API) en linkt niet tegen libnode, dus de node-headers (arch-onafhankelijk)
-# plus de cross-gcc volstaan. Geen require-check hier: de x64-node kan een
-# armv7-binding niet laden; in plaats daarvan controleert readelf of de output
-# een ARM-binary is. De toolchain komt van de exacte GitHub-mirror van musl.cc
-# (musl-cc/musl.cc): musl.cc zelf is niet altijd bereikbaar vanaf Actions-
-# runners; GitHub-releases wel.
+# STAGE 3: sqlite3-binding CROSS-compileren voor armv7/glibc (bullseye) --
+# natief op de runner (amd64) met de Debian armhf-cross-toolchain uit apt.
+# De binding is pure C (N-API) en linkt niet tegen libnode, dus de node-
+# headers (arch-onafhankelijk) plus de cross-gcc volstaan. Geen require-
+# check hier: de x64-node kan een armv7-binding niet laden. readelf
+# controleert dat de output een ARM-binary is, en objdump dat de vereiste
+# glibc-versie niet boven die van bullseye (2.31) uitkomt.
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS sqlite3-armv7
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 make curl ca-certificates xz-utils && \
+      python3 make crossbuild-essential-armhf && \
     rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL --retry 3 \
-      https://github.com/musl-cc/musl.cc/releases/download/v0.0.1/armv7l-linux-musleabihf-cross.tgz \
-      | tar xz -C /opt
-ENV PATH="/opt/armv7l-linux-musleabihf-cross/bin:$PATH" \
-    CC=armv7l-linux-musleabihf-gcc \
-    CXX=armv7l-linux-musleabihf-g++ \
-    AR=armv7l-linux-musleabihf-ar
+ENV CC=arm-linux-gnueabihf-gcc \
+    CXX=arm-linux-gnueabihf-g++ \
+    AR=arm-linux-gnueabihf-ar
 WORKDIR /server
 COPY abs-src/package.json /server/package.json
 COPY --from=prod-deps /server/node_modules /server/node_modules
 RUN cd node_modules/sqlite3 && \
     npx --yes node-gyp rebuild --release --arch=arm && \
     find /server/node_modules -name "*.node" && \
-    armv7l-linux-musleabihf-readelf -h build/Release/node_sqlite3.node | grep -q "Machine:.*ARM" || \
-      (echo 'sqlite3 binding is geen ARM-binary' && exit 1)
+    arm-linux-gnueabihf-readelf -h build/Release/node_sqlite3.node | grep -q "Machine:.*ARM" || \
+      (echo 'sqlite3 binding is geen ARM-binary' && exit 1); \
+    MAXV=$(arm-linux-gnueabihf-objdump -T build/Release/node_sqlite3.node \
+      | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1); \
+    echo "sqlite3-binding vereist maximaal glibc $MAXV"; \
+    [ "$(printf '%s\n2.31\n' "$MAXV" | sort -V | tail -1)" = "2.31" ] || \
+      (echo 'sqlite3-binding vereist nieuwere glibc dan bullseye (2.31)' && exit 1)
 
-# STAGE 4: libnusqlite3 compileren voor armv7/musl (geen upstream-binary).
-# Procedure volgens de eigen build-workflow van mikiher/nunicode-sqlite:
-# nunicode-broncode van Bitbucket (tag 1.11) + aangepaste CMakeLists.txt uit
-# mikiher/nunicode-sqlite + sqlite3-headers in de source-tree, dan cmake+make.
+# STAGE 4: libnusqlite3 compileren voor armv7/glibc (geen upstream-binary).
+# Onder QEMU op de bullseye-armv7-basis (git/cmake/make onder QEMU werken
+# prima). Procedure volgens de eigen build-workflow van mikiher/
+# nunicode-sqlite: nunicode-broncode van Bitbucket (tag 1.11) + aangepaste
+# CMakeLists.txt uit mikiher/nunicode-sqlite + sqlite3-headers in de
+# source-tree, dan cmake+make.
 FROM --platform=linux/arm/v7 ${NODE_IMAGE_ARM} AS nusqlite
-RUN apk add --no-cache git cmake make g++ sqlite-dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git cmake make g++ libsqlite3-dev && \
+    rm -rf /var/lib/apt/lists/*
 RUN git clone https://bitbucket.org/alekseyt/nunicode.git /tmp/nu && \
     cd /tmp/nu && git checkout 1.11 && \
     git clone --depth 1 https://github.com/mikiher/nunicode-sqlite.git /tmp/nusq && \
@@ -89,9 +95,11 @@ RUN git clone https://bitbucket.org/alekseyt/nunicode.git /tmp/nu && \
     mkdir -p /usr/local/lib/nusqlite3 && \
     cp /tmp/nu/staging/build/sqlite3/libnusqlite3.so /usr/local/lib/nusqlite3/
 
-# STAGE 5: minimale runtime (alpine/musl)
+# STAGE 5: minimale runtime (debian bullseye / glibc 2.31)
 FROM --platform=linux/arm/v7 ${NODE_IMAGE_ARM}
-RUN apk add --no-cache ffmpeg tini tzdata
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ffmpeg tini tzdata && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY --from=nusqlite /usr/local/lib/nusqlite3/libnusqlite3.so /usr/local/lib/nusqlite3/libnusqlite3.so
 
