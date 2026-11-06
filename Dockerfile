@@ -81,9 +81,10 @@ RUN cd node_modules/sqlite3 && \
 # CMakeLists.txt uit mikiher/nunicode-sqlite + sqlite3-headers in de
 # source-tree, dan cmake+make.
 FROM --platform=linux/arm/v7 ${NODE_IMAGE_ARM} AS nusqlite
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      git cmake make g++ libsqlite3-dev && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get update \
+      && apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
+      git cmake make g++ libsqlite3-dev \
+      && rm -rf /var/lib/apt/lists/*
 RUN git clone https://bitbucket.org/alekseyt/nunicode.git /tmp/nu && \
     cd /tmp/nu && git checkout 1.11 && \
     git clone --depth 1 https://github.com/mikiher/nunicode-sqlite.git /tmp/nusq && \
@@ -97,9 +98,10 @@ RUN git clone https://bitbucket.org/alekseyt/nunicode.git /tmp/nu && \
 
 # STAGE 5: minimale runtime (debian bullseye / glibc 2.31)
 FROM --platform=linux/arm/v7 ${NODE_IMAGE_ARM}
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ffmpeg tini tzdata && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get update \
+      && apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
+      ffmpeg tini tzdata \
+      && rm -rf /var/lib/apt/lists/*
 
 COPY --from=nusqlite /usr/local/lib/nusqlite3/libnusqlite3.so /usr/local/lib/nusqlite3/libnusqlite3.so
 
