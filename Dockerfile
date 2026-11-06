@@ -67,7 +67,7 @@ WORKDIR /server
 COPY abs-src/package.json /server/package.json
 COPY --from=prod-deps /server/node_modules /server/node_modules
 RUN cd node_modules/sqlite3 && \
-    npx --yes node-gyp rebuild --release && \
+    npx --yes node-gyp rebuild --release --arch=arm && \
     find /server/node_modules -name "*.node" && \
     armv7l-linux-musleabihf-readelf -h build/Release/node_sqlite3.node | grep -q "Machine:.*ARM" || \
       (echo 'sqlite3 binding is geen ARM-binary' && exit 1)
