@@ -6,11 +6,13 @@
 # op de Actions-runner gebouwd (snel, geen QEMU). Alleen de prod-dependencies
 # en libnusqlite3 worden voor armv7 gebouwd.
 #
-# Basis: Debian bookworm (12). Bullseye (11) is in aug 2026 uit de LTS:
-# de security-repo's leveren daarom 404's. Node 22 is de laatste Node met
-# officiele armv7-images/binaries.
+# Runtime-basis: Alpine (musl). Debian bookworm gebruikt glibc 2.36; binaries
+# daarvan crashen op de oude QNAP-kernel met "ELF load command address/offset
+# not page-aligned". musl heeft dat probleem niet. Node 22 is de laatste Node
+# met officiele armv7-images.
 
 ARG NODE_IMAGE=node:22-bookworm-slim
+ARG NODE_IMAGE_ARM=node:22-alpine
 
 # STAGE 0: client (Nuxt generate) -- native, output is arch-onafhankelijk
 FROM ${NODE_IMAGE} AS build-client
@@ -27,23 +29,19 @@ COPY abs-src/server /server/server
 RUN npm ci --include=dev --ignore-scripts && npm cache clean --force
 RUN npm run build:server
 
-# STAGE 2: productie-node_modules voor armv7 (draait onder QEMU, klein en snel)
-FROM --platform=linux/arm/v7 ${NODE_IMAGE} AS build-server
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      git python3 make g++ ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+# STAGE 2: productie-node_modules voor armv7 (musl/alpine)
+FROM --platform=linux/arm/v7 ${NODE_IMAGE_ARM} AS build-server
+RUN apk add --no-cache git python3 make g++
 WORKDIR /server
 COPY --from=compile-server /server /server
 RUN npm ci --omit=dev && npm cache clean --force
 
-# STAGE 3: libnusqlite3 compileren voor armv7 (geen upstream-binary).
+# STAGE 3: libnusqlite3 compileren voor armv7/musl (geen upstream-binary).
 # Procedure volgens de eigen build-workflow van mikiher/nunicode-sqlite:
 # nunicode-broncode van Bitbucket (tag 1.11) + aangepaste CMakeLists.txt uit
 # mikiher/nunicode-sqlite + sqlite3-headers in de source-tree, dan cmake+make.
-FROM --platform=linux/arm/v7 ${NODE_IMAGE} AS nusqlite
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      git cmake make g++ libsqlite3-dev ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+FROM --platform=linux/arm/v7 ${NODE_IMAGE_ARM} AS nusqlite
+RUN apk add --no-cache git cmake make g++ sqlite-dev
 RUN git clone https://bitbucket.org/alekseyt/nunicode.git /tmp/nu && \
     cd /tmp/nu && git checkout 1.11 && \
     git clone --depth 1 https://github.com/mikiher/nunicode-sqlite.git /tmp/nusq && \
@@ -55,11 +53,9 @@ RUN git clone https://bitbucket.org/alekseyt/nunicode.git /tmp/nu && \
     mkdir -p /usr/local/lib/nusqlite3 && \
     cp /tmp/nu/staging/build/sqlite3/libnusqlite3.so /usr/local/lib/nusqlite3/
 
-# STAGE 4: minimale runtime
-FROM --platform=linux/arm/v7 ${NODE_IMAGE}
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ffmpeg tini tzdata && \
-    rm -rf /var/lib/apt/lists/*
+# STAGE 4: minimale runtime (alpine/musl)
+FROM --platform=linux/arm/v7 ${NODE_IMAGE_ARM}
+RUN apk add --no-cache ffmpeg tini tzdata
 
 COPY --from=nusqlite /usr/local/lib/nusqlite3/libnusqlite3.so /usr/local/lib/nusqlite3/libnusqlite3.so
 
