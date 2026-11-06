@@ -2,9 +2,11 @@
 # Eigen armv7 (32-bit ARM) build van Audiobookshelf voor de QNAP TS-431P3.
 # Upstream ondersteunt armv7 niet meer; dit is een best-effort build.
 #
-# Bouwstrategie: alles wat pure JS oplevert (client + server) wordt NATIEF
-# op de Actions-runner gebouwd (snel, geen QEMU). Alleen de prod-dependencies
-# en libnusqlite3 worden voor armv7 gebouwd.
+# Bouwstrategie: client, server (tsc) EN de productie-dependencies worden
+# NATIEF op de Actions-runner gebouwd (snel, geen QEMU; npm ci onder QEMU
+# hangt). De prod-node_modules zijn pure JS; een check laat de build
+# expliciet falen als er toch native .node-binaries tussen blijken te
+# zitten. Onder QEMU blijft alleen de kleine libnusqlite3-compilatie over.
 #
 # Runtime-basis: Alpine (musl). Debian bookworm gebruikt glibc 2.36; binaries
 # daarvan crashen op de oude QNAP-kernel met "ELF load command address/offset
@@ -29,12 +31,17 @@ COPY abs-src/server /server/server
 RUN npm ci --include=dev --ignore-scripts && npm cache clean --force
 RUN npm run build:server
 
-# STAGE 2: productie-node_modules voor armv7 (musl/alpine)
-FROM --platform=linux/arm/v7 ${NODE_IMAGE_ARM} AS build-server
-RUN apk add --no-cache git python3 make g++
+# STAGE 2: productie-node_modules -- native (npm ci onder QEMU armv7 hangt).
+# Fail-safe: prod-deps moeten pure JS zijn; native .node-binaries laten de
+# build falen zodat het zichtbaar is i.p.v. te crashen op de NAS.
+FROM ${NODE_IMAGE} AS prod-deps
 WORKDIR /server
-COPY --from=compile-server /server /server
-RUN npm ci --omit=dev && npm cache clean --force
+COPY abs-src/index.js abs-src/package.json abs-src/package-lock.json /server/
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+RUN if find node_modules -name "*.node" | grep -q .; then \
+      echo "FOUT: native modules gevonden in prod-deps:" && \
+      find node_modules -name "*.node" && exit 1; \
+    fi
 
 # STAGE 3: libnusqlite3 compileren voor armv7/musl (geen upstream-binary).
 # Procedure volgens de eigen build-workflow van mikiher/nunicode-sqlite:
@@ -61,7 +68,9 @@ COPY --from=nusqlite /usr/local/lib/nusqlite3/libnusqlite3.so /usr/local/lib/nus
 
 WORKDIR /app
 COPY --from=build-client /client/dist /app/client/dist
-COPY --from=build-server /server /app
+COPY --from=compile-server /server/dist-server /app/dist-server
+COPY --from=prod-deps /server/node_modules /app/node_modules
+COPY --from=prod-deps /server/package.json /server/index.js /app/
 
 ENV PORT=80 \
     NODE_ENV=production \
