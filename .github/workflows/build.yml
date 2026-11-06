@@ -20,14 +20,16 @@ jobs:
       contents: read
       packages: write
     steps:
+      # 1. EERST de repo uitchecken (checkout maakt de werkmap leeg!)
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # 2. DAARNA de ABS-broncode ophalen
       - name: ABS-broncode ophalen (${{ env.ABS_VERSION }})
         run: |
           mkdir abs-src
           curl -L https://github.com/advplyr/audiobookshelf/archive/refs/tags/v${ABS_VERSION}.tar.gz \
             | tar xz --strip-components=1 -C abs-src
-
-      - name: Checkout Dockerfile
-        uses: actions/checkout@v4
 
       - name: QEMU + buildx instellen
         run: |
@@ -35,7 +37,7 @@ jobs:
           docker buildx create --use
 
       - name: Inloggen bij GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
