@@ -47,16 +47,22 @@ RUN if find node_modules -name "*.node" | grep -q .; then \
     fi
 
 # STAGE 3: sqlite3-binding CROSS-compileren voor armv7/glibc (bullseye) --
-# natief op de runner (amd64) met de Debian armhf-cross-toolchain uit apt.
+# natief op de runner (amd64), op een BULLSEYE-basis met de bullseye-
+# cross-toolchain (gcc-10). De bookworm-cross-toolchain linkt tegen armhf-
+# libc 2.36 en produceert GLIBC_2.34-symbolen, die bullseye (2.31) mist.
+# Dit werd door de objdump-glibc-check betrapt; vandaar deze basis.
 # De binding is pure C (N-API) en linkt niet tegen libnode, dus de node-
 # headers (arch-onafhankelijk) plus de cross-gcc volstaan. Geen require-
 # check hier: de x64-node kan een armv7-binding niet laden. readelf
 # controleert dat de output een ARM-binary is, en objdump dat de vereiste
 # glibc-versie niet boven die van bullseye (2.31) uitkomt.
-FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS sqlite3-armv7
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 make crossbuild-essential-armhf && \
-    rm -rf /var/lib/apt/lists/*
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE_ARM} AS sqlite3-armv7
+RUN rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/*.list /etc/apt/sources.list \
+      && printf 'deb http://deb.debian.org/debian bullseye main\ndeb http://deb.debian.org/debian bullseye-updates main\n' > /etc/apt/sources.list \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
+      python3 make crossbuild-essential-armhf \
+      && rm -rf /var/lib/apt/lists/*
 ENV CC=arm-linux-gnueabihf-gcc \
     CXX=arm-linux-gnueabihf-g++ \
     AR=arm-linux-gnueabihf-ar
