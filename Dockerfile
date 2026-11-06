@@ -2,11 +2,12 @@
 # Eigen armv7 (32-bit ARM) build van Audiobookshelf voor de QNAP TS-431P3.
 # Upstream ondersteunt armv7 niet meer; dit is een best-effort build.
 #
-# Bouwstrategie: client, server (tsc) EN de productie-dependencies worden
-# NATIEF op de Actions-runner gebouwd (snel, geen QEMU; npm ci onder QEMU
-# hangt). De prod-node_modules zijn pure JS; een check laat de build
-# expliciet falen als er toch native .node-binaries tussen blijken te
-# zitten. Onder QEMU blijft alleen de kleine libnusqlite3-compilatie over.
+# Bouwstrategie: client, server (tsc) en de JS-productie-dependencies worden
+# NATIEF op de Actions-runner gebouwd ($BUILDPLATFORM; snel, geen QEMU; een
+# volledige npm ci onder QEMU armv7 hangt). De native npm-module sqlite3
+# wordt daarna apart voor armv7/musl gecompileerd met npm rebuild (lokaal
+# werk, geen npm ci). Onder QEMU blijven dus alleen sqlite3 en de kleine
+# libnusqlite3-compilatie over.
 #
 # Runtime-basis: Alpine (musl). Debian bookworm gebruikt glibc 2.36; binaries
 # daarvan crashen op de oude QNAP-kernel met "ELF load command address/offset
@@ -16,34 +17,46 @@
 ARG NODE_IMAGE=node:22-bookworm-slim
 ARG NODE_IMAGE_ARM=node:22-alpine
 
-# STAGE 0: client (Nuxt generate) -- native, output is arch-onafhankelijk
-FROM ${NODE_IMAGE} AS build-client
+# STAGE 0: client (Nuxt generate) -- native op de runner
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS build-client
 WORKDIR /client
 COPY abs-src/client /client
 RUN npm ci && npm cache clean --force
 RUN npm run generate
 
 # STAGE 1: server (tsc) -- native, i.v.m. QEMU-traagheid/SIGILL (zoals upstream)
-FROM ${NODE_IMAGE} AS compile-server
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS compile-server
 WORKDIR /server
 COPY abs-src/index.js abs-src/package.json abs-src/package-lock.json abs-src/tsconfig.server.json /server/
 COPY abs-src/server /server/server
 RUN npm ci --include=dev --ignore-scripts && npm cache clean --force
 RUN npm run build:server
 
-# STAGE 2: productie-node_modules -- native (npm ci onder QEMU armv7 hangt).
-# Fail-safe: prod-deps moeten pure JS zijn; native .node-binaries laten de
-# build falen zodat het zichtbaar is i.p.v. te crashen op de NAS.
-FROM ${NODE_IMAGE} AS prod-deps
+# STAGE 2: productie-node_modules -- native; --ignore-scripts zodat er geen
+# amd64-native binaries gebouwd worden. Fail-safe: als er toch .node-files
+# verschijnen faalt de build expliciet.
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS prod-deps
 WORKDIR /server
 COPY abs-src/index.js abs-src/package.json abs-src/package-lock.json /server/
-RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+RUN npm ci --omit=dev --no-audit --no-fund --ignore-scripts && npm cache clean --force
 RUN if find node_modules -name "*.node" | grep -q .; then \
       echo "FOUT: native modules gevonden in prod-deps:" && \
       find node_modules -name "*.node" && exit 1; \
     fi
 
-# STAGE 3: libnusqlite3 compileren voor armv7/musl (geen upstream-binary).
+# STAGE 3: native npm-modules (sqlite3) voor armv7/musl compileren.
+# Gebruikt de node_modules uit prod-deps; npm rebuild doet alleen een
+# node-gyp compile (plus Node-headers download), geen volledige npm ci.
+FROM --platform=linux/arm/v7 ${NODE_IMAGE_ARM} AS native-armv7
+RUN apk add --no-cache python3 make g++
+WORKDIR /server
+COPY abs-src/package.json /server/package.json
+COPY --from=prod-deps /server/node_modules /server/node_modules
+RUN npm rebuild sqlite3 --build-from-source=sqlite3 && \
+    find node_modules -name "*.node" && \
+    node -e "require('sqlite3')" || (echo 'sqlite3 binding werkt niet' && exit 1)
+
+# STAGE 4: libnusqlite3 compileren voor armv7/musl (geen upstream-binary).
 # Procedure volgens de eigen build-workflow van mikiher/nunicode-sqlite:
 # nunicode-broncode van Bitbucket (tag 1.11) + aangepaste CMakeLists.txt uit
 # mikiher/nunicode-sqlite + sqlite3-headers in de source-tree, dan cmake+make.
@@ -60,7 +73,7 @@ RUN git clone https://bitbucket.org/alekseyt/nunicode.git /tmp/nu && \
     mkdir -p /usr/local/lib/nusqlite3 && \
     cp /tmp/nu/staging/build/sqlite3/libnusqlite3.so /usr/local/lib/nusqlite3/
 
-# STAGE 4: minimale runtime (alpine/musl)
+# STAGE 5: minimale runtime (alpine/musl)
 FROM --platform=linux/arm/v7 ${NODE_IMAGE_ARM}
 RUN apk add --no-cache ffmpeg tini tzdata
 
@@ -69,7 +82,7 @@ COPY --from=nusqlite /usr/local/lib/nusqlite3/libnusqlite3.so /usr/local/lib/nus
 WORKDIR /app
 COPY --from=build-client /client/dist /app/client/dist
 COPY --from=compile-server /server/dist-server /app/dist-server
-COPY --from=prod-deps /server/node_modules /app/node_modules
+COPY --from=native-armv7 /server/node_modules /app/node_modules
 COPY --from=prod-deps /server/package.json /server/index.js /app/
 
 ENV PORT=80 \
