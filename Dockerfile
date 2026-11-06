@@ -5,8 +5,12 @@
 # Bouwstrategie: alles wat pure JS oplevert (client + server) wordt NATIEF
 # op de Actions-runner gebouwd (snel, geen QEMU). Alleen de prod-dependencies
 # en libnusqlite3 worden voor armv7 gebouwd.
+#
+# Basis: Debian bookworm (12). Bullseye (11) is in aug 2026 uit de LTS:
+# de security-repo's leveren daarom 404's. Node 22 is de laatste Node met
+# officiele armv7-images/binaries.
 
-ARG NODE_IMAGE=node:22-bullseye-slim
+ARG NODE_IMAGE=node:22-bookworm-slim
 
 # STAGE 0: client (Nuxt generate) -- native, output is arch-onafhankelijk
 FROM ${NODE_IMAGE} AS build-client
