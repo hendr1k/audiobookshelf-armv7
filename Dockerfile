@@ -49,12 +49,16 @@ RUN if find node_modules -name "*.node" | grep -q .; then \
 # (N-API) en linkt niet tegen libnode, dus de node-headers (arch-onafhankelijk)
 # plus de cross-gcc volstaan. Geen require-check hier: de x64-node kan een
 # armv7-binding niet laden; in plaats daarvan controleert readelf of de output
-# een ARM-binary is.
+# een ARM-binary is. De toolchain komt van de exacte GitHub-mirror van musl.cc
+# (musl-cc/musl.cc): musl.cc zelf is niet altijd bereikbaar vanaf Actions-
+# runners; GitHub-releases wel.
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS sqlite3-armv7
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 make curl ca-certificates xz-utils && \
     rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://musl.cc/armv7l-linux-musleabihf-cross.tgz | tar xz -C /opt
+RUN curl -fsSL --retry 3 \
+      https://github.com/musl-cc/musl.cc/releases/download/v0.0.1/armv7l-linux-musleabihf-cross.tgz \
+      | tar xz -C /opt
 ENV PATH="/opt/armv7l-linux-musleabihf-cross/bin:$PATH" \
     CC=armv7l-linux-musleabihf-gcc \
     CXX=armv7l-linux-musleabihf-g++ \
